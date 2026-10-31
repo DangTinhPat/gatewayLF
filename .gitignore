@@ -2,6 +2,5 @@
 .local/
 __pycache__/
 *.py[cod]
-firmware/esp32/include/tap_hw/HcrWifiSecrets.hpp
-firmware/esp32/include/tap_hw/OtaSecrets.hpp
-firmware/esp32/include/tap_hw/WifiSecrets.hpp
+include/gateway/secrets/HcrWifiSecrets.hpp
+include/gateway/secrets/OtaSecrets.hpp
