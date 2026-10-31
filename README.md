@@ -9,6 +9,10 @@ logic đứng dậy và model chạy trên LF.
 - Bus động cơ trái: UART2/GPIO15; phải: UART1/GPIO17.
 - Phải làm MOTOR_HOME sau mỗi lần khởi động trước khi cho phép ARM.
 
+Bus motor dùng module `joint_bus.c` từ bản BL4012e/3in1 đã được người dùng
+kiểm trên motor; bản ghép HCR hiện tại vẫn cần kiểm lại trên phần cứng.
+Xem [kiểm chứng bản kế thừa](firmware/esp32/BL4012E_REUSE_VALIDATION.md).
+
 ## Build
 
 Cài PlatformIO Core, sau đó:

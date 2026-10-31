@@ -1,12 +1,14 @@
 # Luồng động cơ HCR–BL4012e — 2026-10-30
 
-Backend motor đã được tích hợp vào target `esp32-s3-hybrid-mcu`. App khởi tạo
-`EspBlMotor`, hai worker bus và `BlMotorBackend`; không còn dùng
-`UnavailableMotors` trong bản firmware này. Bản tích hợp đã được flash và bắt đầu kiểm tra kết nối, chưa kiểm chứng đáp ứng
-chuyển động. Bản sửa motor/IMU/E-stop và OTA ngày 2026-10-31 đã build/test, nạp USB và
-nạp OTA thực tế thành công. Bản sửa cuối đã xử lý mất header phản hồi do nhả
-chân TX muộn: cả hai bus có bus_err=0, đủ sáu encoder, HOME đã chụp thành công.
-Chưa ARM hoặc kiểm đáp ứng chuyển động; xem báo cáo hiện tại.
+Backend motor dùng `BlMotorBackend`/`EspBlMotor`. Bản ứng viên hiện tại **biên dịch
+trực tiếp module `joint_bus.c` kế thừa từ BL4012e/3in1**, qua adapter C++ mỏng;
+đã bỏ đường FIFO/OEN/RMT tự viết. Build dùng Arduino 3.3.0 / ESP-IDF 5.5.0.
+Xem [bản sửa và mức kiểm chứng](BL4012E_REUSE_VALIDATION.md),
+[nguồn module và delta](vendor/bl4012e/PROVENANCE.md).
+
+Các kết quả nạp/đo trong lịch sử thuộc firmware trước. Bản kế thừa này chưa được
+nạp hoặc thử chuyển động. Không coi các lần đọc encoder khi OFF thành công là
+bằng chứng lỗi khi bắt đầu gập chân đã được sửa.
 
 ## Ánh xạ đã chốt
 
@@ -116,9 +118,11 @@ trên core1; service priority20. Worker kiểm deadline độc lập giữa các
 kể cả khi service/UART/console bị treo. Lệnh trùng không gia hạn lease; batch cũ
 quá deadline bị hủy dù vẫn có lệnh mới tới. Lỗi một bus hủy cả hai bus.
 
-Adapter UART có tổng ngân sách mỗi giao dịch: joint 4 ms, wheel 8 ms, kiểm echo,
-checksum, ID, length, opcode/address echo và status. Đây là giới hạn chờ phần
-mềm, không phải số đo phần cứng. OFF có thể phải đợi giao dịch đang chạy; khi
+Module kế thừa dùng các lượt chờ như 3in1: TX-done 5 ms, echo 2 ms,
+reply joint 2 ms hoặc wheel 6 ms. Đây là timeout từng lượt, **không còn là tổng
+budget 4/8 ms** của adapter cũ. `uart_write_bytes` không có tham số timeout;
+không suy ra một hard deadline vật lý từ tổng các giá trị này. Module kiểm
+checksum, ID, length và opcode/address echo; backend kiểm status. OFF có thể phải đợi giao dịch đang chạy; khi
 bus đứt, không thể bảo đảm driver đã tắt chỉ nhờ gửi OFF. Chưa có bằng chứng về
 watchdog nội tại driver hoặc ngắt lực độc lập khi ESP mất nguồn/reset.
 
@@ -185,16 +189,17 @@ ESP→LF đã nhận 24 HELLO hợp lệ, chiều LF→ESP chưa bắt tay; IMU 
 Bản sửa gain đã qua mock tests và build, chưa flash: xem
 `gain120_artifacts/checksums.json`. Kết quả mock không chứng minh đáp ứng motor thật.
 
-## Sửa turnaround vật lý ngày 2026-10-31
+## Lịch sử: thử sửa turnaround ngày 2026-10-31 (đã thay thế)
 
-Wheel trả lời nhanh; đợi TX qua scheduler rồi nhả pad làm mất đầu gói.
+Giả thuyết của đợt sửa cũ là đợi TX qua scheduler rồi nhả pad làm mất đầu gói.
+Đây không phải kết luận nguyên nhân cuối cùng; bản FIFO sau đó vẫn lỗi khi chuyển động.
 Adapter nạp FIFO và đợi TX idle trong critical section có giới hạn, sau đó
 gọi `gpio_ll_output_disable` để nhả chân. Bỏ lần đổi GPIO matrix dư trước
 output-disable vì có thể nuốt start bit đầu. Không bỏ checksum, không thêm retry
 để che lỗi. BUS_TRACE lưu timing/byte thô của lỗi đầu; UART_DIAG tách lỗi queue.
 Các số liệu bring-up phía trên là lịch sử; trạng thái mới xem report 2026-10-31.
 
-## Chẩn đoán lỗi khi bắt đầu chuyển động (2026-10-31)
+## Lịch sử chẩn đoán lỗi khi bắt đầu chuyển động (2026-10-31)
 
 ARM thực đã qua HOME3s và STANDUP~0.14s, sau đó UART1/phải, wheelID1,
 WRITE0x20 mất echo (0 byte), timeout~8ms. LF FAULT3 là phản hồi lỗi MCU;
@@ -209,3 +214,7 @@ speed0, READ0x20 kiểm0 và đọc encoder. Không gửi MIT hoặc enable. Tro
 không được HOME/ARM; sau test phải chụp HOME đúng tư thế. OTA/maintenance dừng
 traffic. Đã chạy thật4000chu kỳ tổng, không lỗi; chưa tái hiện lỗi có chuyển động.
 Bằng chứng: `reports/arm_deep_20261031/off_test.txt`.
+
+Bản kế thừa hiện tại thay `BUS_HW`/`BUS_PAD` bằng `BUS_BYTES` và `BUS_TRACE`.
+`BUS_DRIVER` ghi nguồn module và phiên bản IDF. `MOTOR_WAVE` báo unavailable;
+không đưa các số 0 ra như thể đã đo mức điện tại chân.

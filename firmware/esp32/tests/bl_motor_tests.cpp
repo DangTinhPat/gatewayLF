@@ -323,7 +323,7 @@ int main(int argc,char** argv) {
     r.motor.emergencyStop();r.workers();
     assert(!r.motor.disabled() && r.motor.diagnostics().leg[0].torque_enable[2]==255);
   }
-  for (auto error:{BusError::EchoMismatch,BusError::ReplyInvalid,BusError::Tx}) {
+  for (auto error:{BusError::EchoTimeout,BusError::EchoMismatch,BusError::ReplyInvalid,BusError::Tx}) {
     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
     r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.injected_error=error;
     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();

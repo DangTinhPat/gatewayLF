@@ -4,11 +4,13 @@ Bản build `esp32-s3-hybrid-mcu` chạy IMU, ước lượng vector trọng l�
 UART0, console USB native/Wi-Fi và backend BL4012e thật: `BlMotorBackend` cùng
 hai worker bus UART2/GPIO15 (trái), UART1/GPIO17 (phải). Đã build/test phần mềm;
 đã flash bản trước và đo UART hai chiều; xem báo cáo sửa 2026-10-31 cho bản mới. Manual home và feedback hợp lệ là điều kiện ARM.
+Bản ứng viên kế thừa module 3in1 chưa nạp phần cứng; xem
+[kiểm chứng bản kế thừa](BL4012E_REUSE_VALIDATION.md).
 Chi tiết ở [MOTOR_INTEGRATION.md](MOTOR_INTEGRATION.md).
 
 Logic đứng dậy, model và quyết định chuyển pha nằm trên LF. Bản build này không
 khởi động `AppV3`, CAN motor hoặc gateway UDP LFG1 của bản nháp.
-Bản nháp vẫn có ở target `esp32-s3-luckfox-gateway`.
+Bản nháp còn ở worktree gốc; repository gatewayLF chỉ xuất target hybrid.
 
 **HCR1 nhận từ LF 4 góc hip/crank (rad) + 2 vận tốc bánh (rad/s), không có torque
 command.** Recovery còn có 4 vận tốc feedforward hip/knee hinge. Torque feedback

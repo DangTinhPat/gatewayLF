@@ -1,11 +1,13 @@
 // This translation unit supplies setup()/loop() only in the HCR1 build.
 #ifdef TAP_HYBRID_GATEWAY
+#include <esp_system.h>
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <esp_ota_ops.h>
+#include <esp_app_desc.h>
 #include <driver/uart.h>
 #include <esp_timer.h>
 #include <lwip/sockets.h>
@@ -268,6 +270,8 @@ void pumpOta() {
 
 void status() {
   char line[512];
+  std::snprintf(line,sizeof line,"BUS_DRIVER source=bl4012e_3in1 idf=%s\n",esp_get_idf_version());
+  printLine(line);
   const auto& s = latest_report.state;
   const auto now = static_cast<std::uint64_t>(esp_timer_get_time());
   const auto age = latest_report.imu.stamp_us ?
@@ -290,7 +294,7 @@ void status() {
   char elf_hash[65]{};
   // The convenience API is configured to return only 16 hex characters on
   // this Arduino build. Report the entire descriptor hash for OTA verification.
-  const auto* description=esp_ota_get_app_description();
+  const auto* description=esp_app_get_description();
   for (unsigned i=0;i<32;++i)
     std::snprintf(elf_hash+2*i,3,"%02x",description->app_elf_sha256[i]);
   std::snprintf(line,sizeof line,
@@ -346,13 +350,8 @@ void status() {
     char tx_hex[97]{},echo_hex[97]{};
     for (unsigned j=0;j<trace.tx_count;++j) std::snprintf(tx_hex+2*j,3,"%02x",trace.tx[j]);
     for (unsigned j=0;j<trace.echo_count;++j) std::snprintf(echo_hex+2*j,3,"%02x",trace.echo[j]);
-    std::snprintf(line,sizeof line,"BUS_HW side=%s pad=[%u %u %u] fifo_release=%u ring=%u irq=0x%08x ena=0x%08x status=0x%08x events=0x%08x tx=%s echo=%s\n",
-        side?"R":"L",trace.pad_before,trace.pad_release,trace.pad_finish,
-        trace.fifo_release,trace.ring_bytes,trace.irq_raw,trace.irq_enable,trace.hw_status,trace.events,tx_hex,echo_hex);
-    printLine(line);
-    std::snprintf(line,sizeof line,"BUS_PAD side=%s low=%u high=%u oe=0x%08x out=0x%08x in=0x%08x iomux=0x%08x fsm=0x%08x\n",
-        side?"R":"L",trace.low_samples,trace.high_samples,trace.gpio_enable,trace.gpio_out_route,
-        trace.gpio_in_route,trace.iomux,trace.uart_fsm); printLine(line);
+    std::snprintf(line,sizeof line,"BUS_BYTES side=%s tx=%s echo=%s\n",
+        side?"R":"L",tx_hex,echo_hex); printLine(line);
     char rx_hex[65]{};
     for(unsigned i=0;i<trace.rx_count && i<trace.rx.size();++i)
       std::snprintf(rx_hex+2*i,3,"%02x",trace.rx[i]);
@@ -364,27 +363,7 @@ void status() {
 }
 
 void printPadWaves() {
-  const auto waves=motor_system.padWaves();
-  char line[512];
-  std::snprintf(line,sizeof line,"PAD_WAVE_READY ready=%u gpio=17 channel=4 blocks=2\n",waves.ready);
-  printLine(line);
-  for (unsigned failed=0;failed<2;++failed) {
-    const auto& w=failed?waves.failed:waves.good;
-    char tx[97]{},echo[97]{};
-    for (unsigned i=0;i<w.tx_count && i<w.tx.size();++i) std::snprintf(tx+2*i,3,"%02x",w.tx[i]);
-    for (unsigned i=0;i<w.echo_count && i<w.echo.size();++i) std::snprintf(echo+2*i,3,"%02x",w.echo[i]);
-    std::snprintf(line,sizeof line,
-      "PAD_WAVE kind=%s available=%u serial=%u tick_hz=%u status=%08x irq=%08x id=%u inst=%02x addr=%02x error=%u tx=%s echo=%s\n",
-      failed?"FAIL":"GOOD",w.available,w.serial,w.tick_hz,w.status,w.interrupts,w.id,w.instruction,w.address,w.error,tx,echo);
-    printLine(line);
-    if (!w.available) continue;
-    for (unsigned base=0;base<w.items.size();base+=12) {
-      char words[12*9+1]{};
-      for (unsigned j=0;j<12;++j) std::snprintf(words+j*9,10,"%08x,",w.items[base+j]);
-      std::snprintf(line,sizeof line,"PAD_ITEMS kind=%s serial=%u offset=%u words=%s\n",failed?"FAIL":"GOOD",w.serial,base,words);
-      printLine(line);
-    }
-  }
+  printLine("PAD_WAVE_READY ready=0 driver=bl4012e_3in1 (no RMT pad instrumentation)\n");
 }
 
 void handleLine(const char* line) {
@@ -394,7 +373,7 @@ void handleLine(const char* line) {
   if (!std::strcmp(line, "HELP")) {
     printLine("Commands: STATUS, ESTOP, CLEAR_FAULT, CAL_IMU, MOTOR_BUS_TEST (2000 OFF cycles), MOTOR_HOME, MOTOR_ZERO hipL hipR kneeL kneeR (rad). ARM/DISARM/RESET/VELOCITY use the LF local command socket.\n");
     printLine("CAL_IMU: hold robot completely still, motors confirmed OFF; collect 1 s of stable samples. No automatic acceptance of large gyro bias at boot.\n");
-    printLine("MOTOR_WAVE: read passive GPIO17 RMT pulse captures (first good wheel READ and first failure); no motor command.\n");
+    printLine("MOTOR_WAVE: unavailable with the inherited 3in1 transport; use BUS_TRACE.\n");
     printLine("OTA_BEGIN: lock motion until reboot, wait OFF then accept OTA. OTA_REBOOT: reboot only after confirmed OFF. STATUS: OTA readiness.\n");
     return;
   }
@@ -569,7 +548,7 @@ void loop() {
   (void)xQueueReceive(report_queue, &latest_report, 0);
   usb_lines.read(Serial);
   if (console_server.hasClient()) {
-    console_client.stop(); console_client = console_server.available();
+    console_client.stop(); console_client = console_server.accept();
     console_client.setNoDelay(true); console_client.setTimeout(0);
     tcp_lines = {}; tcp_out.used = 0; printLine("HCR1 lower layer; HELP for commands\n");
   }

@@ -1,7 +1,8 @@
 # Kiểm chứng tầng dưới
 
-Bản sửa motor/IMU/E-stop và OTA ngày 2026-10-31: xem
-[báo cáo hiện tại](HYBRID_MCU_VALIDATION.md).
+Bản ứng viên hiện tại kế thừa module bus 3in1: xem
+[báo cáo hiện tại](BL4012E_REUSE_VALIDATION.md).
+Các mục bên dưới là lịch sử, không phải chứng cứ phần cứng cho bản ứng viên.
 
 ## Tích hợp motor ngày 2026-10-30 (lịch sử)
 

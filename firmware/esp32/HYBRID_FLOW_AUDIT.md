@@ -53,9 +53,9 @@ flowchart LR
   trên CPU; `hybrid/rknn_backend.py` và `native/tensor_math.c` gọi RKNN NPU.
 - MCU build `esp32-s3-hybrid-mcu`: `HybridGatewayApp/Core`, MPU6500 và
   `BlMotorBackend`/`EspBlMotor`. Không chạy app bench `BL4012e/3in1` hoặc
-  controller AppV3 cũ; backend mới lấy giao thức bus từ bench.
+  controller AppV3 cũ; backend hiện link module bus từ bench, xem BL4012E_REUSE_VALIDATION.md.
 - `BL4012e/3in1`: firmware ESP-IDF độc lập để điều khiển motor bằng GUI.
-  Không phải một library đã được link vào firmware HCR Arduino.
+  App bench không được link vào HCR; riêng module joint_bus.c hiện được kế thừa và link.
 
 `run_model.py` và `standup_bridge.cpp` ở gói controller gốc là đường mô phỏng.
 Bridge đó có thể trả torque để ghi `MuJoCo.ctrl`. Không dùng giao diện bridge

@@ -5,7 +5,7 @@
 #include <cstdint>
 
 namespace tap_hw::hybrid {
-// This boundary is also exercised on the host with the real packet codec.
+// HCR backend boundary. Live hardware uses the inherited C joint_bus module.
 class MotorCritical {
  public:
   virtual ~MotorCritical() = default;
@@ -24,10 +24,7 @@ struct BusTrace {
   std::uint8_t echo_count=0, rx_count=0, expected=0;
   std::array<std::uint8_t,32> rx{};
   std::array<std::uint8_t,48> tx{}, echo{};
-  std::uint8_t tx_count=0, pad_before=0, pad_release=0, pad_finish=0, fifo_release=0;
-  std::uint32_t irq_raw=0, irq_enable=0, hw_status=0, ring_bytes=0, events=0;
-  std::uint32_t gpio_enable=0, gpio_out_route=0, gpio_in_route=0, iomux=0, uart_fsm=0;
-  std::uint16_t low_samples=0, high_samples=0;
+  std::uint8_t tx_count=0;
 
 };
 struct BusReply {
@@ -46,6 +43,8 @@ class MotorBus {
                        const std::uint8_t* params, std::size_t count,
                        std::size_t read_count, BusReply&) noexcept = 0;
 };
+// Host reference codec used by mock-bus regression tests. EspMotorBus delegates
+// packet construction/parsing to vendor/bl4012e/src/joint_bus.c instead.
 std::size_t motorPacket(std::uint8_t id, std::uint8_t instruction,
                         const std::uint8_t* params, std::size_t count,
                         std::array<std::uint8_t,48>& out) noexcept;
