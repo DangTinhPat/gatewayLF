@@ -148,15 +148,15 @@ recovery PI có coupling hip/knee. Đây là adapter trực tiếp cho motor hi�
 fit động học/gain/giới hạn lực phải được đo và thử sau khi nạp. Không thay
 trọng số model hoặc thuật toán LF để che khác biệt đó.
 
-Một batch cho đủ ba motor trên mỗi bus chiếm 93 byte trên dây, tính lệnh yêu
+Một batch cho đủ ba motor trên mỗi bus chiếm 97 byte trên dây, tính lệnh yêu
 cầu và phản hồi: mỗi MIT joint 17+11=28 byte (2 joint: 56); wheel speed write
-9+9=18; wheel encoder read 8+11=19. Tổng 56+18+19=93 byte. Byte echo của
-UART một dây là bản MCU tự đọc trong lúc phát, không phải bản truyền thêm lần
-nữa trên dây. Với UART 1 Mbaud/8N1, mỗi byte chiếm 10 bit, nên phần truyền tối
-thiểu là 930/1.000.000 = 0,93 ms mỗi batch, chưa kể khoảng chờ phản hồi và lịch
-task. Có thể phục vụ đầu vào 200 Hz về mặt thời gian truyền thô, nhưng tần số áp
-dụng thực phải đọc `cycle_max_us`, tuổi encoder và ACK khi thử thật; build/mock
-không chứng minh 200 Hz.
+9+9=18; wheel encoder read 8+15=23 (lệnh đọc 6 byte dữ liệu). Tổng 56+18+23=97
+byte. Byte echo của UART một dây là bản MCU tự đọc trong lúc phát, không phải bản
+truyền thêm lần nữa trên dây. Với UART 1 Mbaud/8N1, mỗi byte chiếm 10 bit, nên
+phần truyền tối thiểu là 970/1.000.000 = 0,97 ms mỗi batch, chưa kể khoảng chờ
+phản hồi và lịch task. Có thể phục vụ đầu vào 200 Hz về mặt thời gian truyền thô,
+nhưng tần số áp dụng thực phải đọc `cycle_max_us`, tuổi encoder và ACK khi thử
+thật; build/mock không chứng minh 200 Hz.
 
 Cấu hình nằm trong `include/tap_hw/BlMotor.hpp` (`BlMotorConfig`). Sign và
 limit/gain không nhận thay đổi trong lúc ARM; chỉnh cấu hình cần build lại.
