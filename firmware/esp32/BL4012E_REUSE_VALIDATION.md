@@ -1,5 +1,8 @@
 # Kế thừa bus BL4012e/3in1 vào HCR — 2026-10-31
 
+**Lịch sử baseline c53d6de.** Bản mới kế thừa sửa miss/turnaround của 3in1:
+[xem báo cáo hiện tại](MISS_RECOVERY_VALIDATION.md).
+
 Bản ứng viên thay phần truyền UART tự viết bằng **module C của 3in1**.
 Chưa nạp ESP, chưa ARM, chưa thử motor trong đợt sửa này. Đây không phải kết
 luận lỗi vật lý đã hết. Bản bench 3in1 của người dùng được giữ nguyên.

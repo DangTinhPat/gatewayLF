@@ -5,7 +5,7 @@ UART0, console USB native/Wi-Fi và backend BL4012e thật: `BlMotorBackend` cù
 hai worker bus UART2/GPIO15 (trái), UART1/GPIO17 (phải). Đã build/test phần mềm;
 đã flash bản trước và đo UART hai chiều; xem báo cáo sửa 2026-10-31 cho bản mới. Manual home và feedback hợp lệ là điều kiện ARM.
 Bản ứng viên kế thừa module 3in1 chưa nạp phần cứng; xem
-[kiểm chứng bản kế thừa](BL4012E_REUSE_VALIDATION.md).
+[kiểm chứng bản kế thừa](MISS_RECOVERY_VALIDATION.md).
 Chi tiết ở [MOTOR_INTEGRATION.md](MOTOR_INTEGRATION.md).
 
 Logic đứng dậy, model và quyết định chuyển pha nằm trên LF. Bản build này không

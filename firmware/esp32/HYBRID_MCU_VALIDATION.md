@@ -1,7 +1,7 @@
 # Kiểm chứng tầng dưới
 
 Bản ứng viên hiện tại kế thừa module bus 3in1: xem
-[báo cáo hiện tại](BL4012E_REUSE_VALIDATION.md).
+[báo cáo hiện tại](MISS_RECOVERY_VALIDATION.md).
 Các mục bên dưới là lịch sử, không phải chứng cứ phần cứng cho bản ứng viên.
 
 ## Tích hợp motor ngày 2026-10-30 (lịch sử)

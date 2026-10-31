@@ -9,8 +9,11 @@
 
 #include "esp_check.h"
 #include "esp_rom_gpio.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
+#include "hal/uart_ll.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/uart_periph.h"
 
@@ -23,12 +26,23 @@ static const char *TAG = "joint_bus";
 
 #define MAX_FRAME 48
 #define RX_RING 512
-#define TX_DONE_TIMEOUT pdMS_TO_TICKS(5)
-// Per-read wait. A joint answers ~500 us (register 0x05) after our last byte;
-// the BL4012 wheel answers later and gets a longer window. The echo of our own
-// frame always uses the short one.
-#define RX_TIMEOUT_JOINT pdMS_TO_TICKS(2)
-#define RX_TIMEOUT_WHEEL pdMS_TO_TICKS(6)
+// Upper bound for one frame on the wire (MAX_FRAME bytes at 1 Mbps = 480 us).
+#define TX_HOLD_MAX_US 1000
+// Reply window after our last byte. A joint answers ~500 us later (register
+// 0x05); 3 ticks of 1 ms give it 2-3 ms (2 ticks could be barely 1 ms). A free
+// BL4012 answers in ~1.3 ms but a held or loaded one much later; Lumi-Tanker
+// waits 8 ms for it, 9 ticks give 8-9 ms.
+// The echo of our own frame always uses the joint window.
+#define RX_TIMEOUT_JOINT pdMS_TO_TICKS(3)
+#define RX_TIMEOUT_WHEEL pdMS_TO_TICKS(9)
+// Idle time before we drive DATA again. Without it the frame that follows a
+// reply was sometimes garbled at its start (echo "23 74 C2 01 2F 06 ..." for
+// "FF FF 02 0D 03 1A 10 27 78 00 2F 06 ..."): the motor that had just answered
+// had not released the line yet. 100 us = 10 byte times at 1 Mbps.
+#define TURNAROUND_US 100
+// After a failed exchange, wait until the line has been silent for one tick
+// (at most this many ticks) so a late reply cannot collide with our next frame.
+#define DRAIN_MAX_TICKS 10
 
 static uint8_t checksum(const uint8_t *p, size_t len) {
   uint8_t sum = 0;
@@ -75,35 +89,122 @@ esp_err_t joint_bus_init(joint_bus_t *bus, uart_port_t uart, gpio_num_t pin, int
   return ESP_OK;
 }
 
+static portMUX_TYPE s_wire_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// Puts the frame straight into the TX FIFO and releases DATA the moment the
+// last stop bit is out. Waiting for the driver's TX-done wakeup held DATA for
+// 180-309 us after the frame in Lumi-Tanker's logs: too late for the BL4012,
+// which starts answering earlier than that, so its reply lost its first bytes.
+// The spin lasts one frame time (<= 480 us) with interrupts off on this core.
+static bool send_frame(joint_bus_t *bus, const uint8_t *tx, size_t len) {
+  uart_dev_t *hw = UART_LL_GET_HW(bus->uart);
+  taskENTER_CRITICAL(&s_wire_lock);
+  const int64_t start = esp_timer_get_time();
+  bool ok = uart_ll_is_tx_idle(hw) && uart_ll_get_txfifo_len(hw) >= len;
+  if (ok) {
+    bus_drive(bus);
+    uart_ll_write_txfifo(hw, tx, len);
+    while (!uart_ll_is_tx_idle(hw) && esp_timer_get_time() - start < TX_HOLD_MAX_US) {
+    }
+    ok = uart_ll_is_tx_idle(hw);
+  }
+  bus_release(bus);
+  if (!ok) {
+    uart_ll_txfifo_rst(hw);
+  }
+  taskEXIT_CRITICAL(&s_wire_lock);
+  return ok;
+}
+
+static void capture(joint_bus_t *bus, char kind, const uint8_t *tx, size_t tx_len,
+                    const uint8_t *rx, int rx_len) {
+  jb_capture_t *c = &bus->last_bad;
+  c->kind = kind;
+  c->tx_len = tx_len < JB_CAPTURE_LEN ? tx_len : JB_CAPTURE_LEN;
+  c->rx_len = rx_len <= 0 ? 0 : (rx_len < JB_CAPTURE_LEN ? rx_len : JB_CAPTURE_LEN);
+  memcpy(c->tx, tx, c->tx_len);
+  memcpy(c->rx, rx, c->rx_len);
+  c->at_us = esp_timer_get_time();
+}
+
+// Bytes found here belong to a reply that came after its window closed.
+static void wait_quiet(joint_bus_t *bus) {
+  uint8_t junk[64];
+  int late = 0;
+  for (int i = 0; i < DRAIN_MAX_TICKS; i++) {
+    const int n = uart_read_bytes(bus->uart, junk, sizeof(junk), 1);
+    if (n <= 0) {
+      break;
+    }
+    late += n;
+  }
+  if (late) {
+    bus->err_late++;
+  }
+  bus->drain = false;
+}
+
 // Send one frame, check that the bus carried it intact (our echo), then read
 // exactly rx_len reply bytes. rx_len == 0 means no reply is expected.
-static esp_err_t transact(joint_bus_t *bus, const uint8_t *tx, size_t tx_len, uint8_t *rx,
+static esp_err_t exchange(joint_bus_t *bus, const uint8_t *tx, size_t tx_len, uint8_t *rx,
                           size_t rx_len, TickType_t rx_timeout) {
   uint8_t echo[MAX_FRAME];
 
+  if (bus->drain) {
+    wait_quiet(bus);
+  }
+  const int64_t wait_us = bus->idle_since_us + TURNAROUND_US - esp_timer_get_time();
+  if (wait_us > 0) {
+    esp_rom_delay_us((uint32_t)wait_us);
+  }
   uart_flush_input(bus->uart);
-  bus_drive(bus);
-  uart_write_bytes(bus->uart, tx, tx_len);
-  esp_err_t err = uart_wait_tx_done(bus->uart, TX_DONE_TIMEOUT);
-  bus_release(bus);
-  if (err != ESP_OK) {
+  if (!send_frame(bus, tx, tx_len)) {
     bus->err_timeout++;
+    bus->drain = true;
     return ESP_ERR_TIMEOUT;
   }
 
-  if (uart_read_bytes(bus->uart, echo, tx_len, RX_TIMEOUT_JOINT) != (int)tx_len ||
-      memcmp(echo, tx, tx_len) != 0) {
+  const int echoed = uart_read_bytes(bus->uart, echo, tx_len, RX_TIMEOUT_JOINT);
+  if (echoed != (int)tx_len || memcmp(echo, tx, tx_len) != 0) {
     bus->err_echo++;
+    capture(bus, 'E', tx, tx_len, echo, echoed);
+    bus->drain = true;
     return ESP_ERR_INVALID_RESPONSE;
   }
   if (rx_len == 0) {
     return ESP_OK;
   }
-  if (uart_read_bytes(bus->uart, rx, rx_len, rx_timeout) != (int)rx_len) {
+  // The reply's first sync byte can be lost when the motor starts answering
+  // while DATA is turning around (seen on the BL4012: "FF 01 0B ..."). The
+  // sync bytes are outside the checksum, so a reply missing exactly one of them
+  // is restored and still validated in full by request().
+  int got = uart_read_bytes(bus->uart, rx, rx_len - 1, rx_timeout);
+  if (got == (int)rx_len - 1) {
+    if (rx[0] == 0xFF && rx[1] != 0xFF) {
+      memmove(rx + 1, rx, rx_len - 1);
+      bus->sync_recovered++;
+      got = rx_len;
+    } else {
+      got += uart_read_bytes(bus->uart, rx + rx_len - 1, 1, RX_TIMEOUT_JOINT);
+    }
+  }
+  if (got != (int)rx_len) {
     bus->err_timeout++;
+    if (got > 0) {
+      bus->err_partial++;  // the reply started but was cut short
+      capture(bus, 'P', tx, tx_len, rx, got);
+    }
+    bus->drain = true;
     return ESP_ERR_TIMEOUT;
   }
   return ESP_OK;
+}
+
+static esp_err_t transact(joint_bus_t *bus, const uint8_t *tx, size_t tx_len, uint8_t *rx,
+                          size_t rx_len, TickType_t rx_timeout) {
+  const esp_err_t err = exchange(bus, tx, tx_len, rx, rx_len, rx_timeout);
+  bus->idle_since_us = esp_timer_get_time();
+  return err;
 }
 
 static esp_err_t request(joint_bus_t *bus, jb_format_t fmt, uint8_t id, uint8_t inst,
@@ -140,6 +241,8 @@ static esp_err_t request(joint_bus_t *bus, jb_format_t fmt, uint8_t id, uint8_t 
       rx[rx_len - 1] != checksum(&rx[2], rx_len - 3) || rx[echo_at] != tx[3] ||
       rx[echo_at + 1] != inst || rx[echo_at + 2] != pre_p1) {
     bus->err_frame++;
+    capture(bus, 'F', tx, tx_len, rx, rx_len);
+    bus->drain = true;
     return ESP_ERR_INVALID_RESPONSE;
   }
 

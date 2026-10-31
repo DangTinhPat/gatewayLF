@@ -53,7 +53,7 @@ flowchart LR
   trên CPU; `hybrid/rknn_backend.py` và `native/tensor_math.c` gọi RKNN NPU.
 - MCU build `esp32-s3-hybrid-mcu`: `HybridGatewayApp/Core`, MPU6500 và
   `BlMotorBackend`/`EspBlMotor`. Không chạy app bench `BL4012e/3in1` hoặc
-  controller AppV3 cũ; backend hiện link module bus từ bench, xem BL4012E_REUSE_VALIDATION.md.
+  controller AppV3 cũ; backend hiện link module bus từ bench, xem MISS_RECOVERY_VALIDATION.md.
 - `BL4012e/3in1`: firmware ESP-IDF độc lập để điều khiển motor bằng GUI.
   App bench không được link vào HCR; riêng module joint_bus.c hiện được kế thừa và link.
 

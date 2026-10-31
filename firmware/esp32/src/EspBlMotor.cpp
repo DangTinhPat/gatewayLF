@@ -14,6 +14,10 @@ bool EspMotorBus::begin(uart_port_t uart, gpio_num_t data, gpio_num_t unused_rx)
   initialized_=joint_bus_init(&bus_,uart,data,1000000)==ESP_OK;
   return initialized_;
 }
+BusStats EspMotorBus::stats() const noexcept {
+  return {bus_.err_timeout,bus_.err_echo,bus_.err_frame,bus_.err_partial,
+          bus_.err_late,bus_.sync_recovered,bus_.err_quiet,bus_.aborted};
+}
 bool EspMotorBus::request(BusFormat fmt, std::uint8_t id, std::uint8_t inst,
                           const std::uint8_t* p, std::size_t n,
                           std::size_t reads, BusReply& reply) noexcept {
@@ -27,6 +31,10 @@ bool EspMotorBus::request(BusFormat fmt, std::uint8_t id, std::uint8_t inst,
   if (id==0 || id>=0xfe || (fmt!=BusFormat::Joint && fmt!=BusFormat::Wheel) ||
       !(ping || read || write)) { error_=BusError::Packet; return false; }
   const auto format=fmt==BusFormat::Wheel?JB_FMT_WHEEL:JB_FMT_JOINT;
+  bus_.deadline_us=now()+20000; // Bound even OFF/configuration transactions.
+  if (permit_.deadline_us && permit_.deadline_us<static_cast<std::uint64_t>(bus_.deadline_us))
+    bus_.deadline_us=permit_.deadline_us;
+  bus_.permit=permit_.valid; bus_.permit_context=permit_.context;
   joint_reply_t result{};
   BusReply decoded{};
   esp_err_t rc;
@@ -41,10 +49,14 @@ bool EspMotorBus::request(BusFormat fmt, std::uint8_t id, std::uint8_t inst,
     case JB_ERROR_ECHO_MISMATCH: error_=BusError::EchoMismatch; break;
     case JB_ERROR_REPLY_TIMEOUT: error_=BusError::ReplyTimeout; break;
     case JB_ERROR_REPLY_INVALID: error_=BusError::ReplyInvalid; break;
+    case JB_ERROR_DEADLINE: error_=BusError::Deadline; break;
+    case JB_ERROR_CANCELLED: error_=BusError::Cancelled; break;
+    case JB_ERROR_QUIET: error_=BusError::Quiet; break;
   }
   const auto& t=bus_.trace;
   trace_.tx_us=t.tx_us; trace_.echo_us=t.echo_us; trace_.total_us=t.total_us;
   trace_.tx_count=t.tx_count; trace_.echo_count=t.echo_count;
+  trace_.sync_restored=t.sync_restored;
   trace_.rx_count=t.rx_count; trace_.expected=t.expected;
   std::copy_n(t.tx,trace_.tx.size(),trace_.tx.begin());
   std::copy_n(t.echo,trace_.echo.size(),trace_.echo.begin());

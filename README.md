@@ -11,7 +11,7 @@ logic đứng dậy và model chạy trên LF.
 
 Bus motor dùng module `joint_bus.c` từ bản BL4012e/3in1 đã được người dùng
 kiểm trên motor; bản ghép HCR hiện tại vẫn cần kiểm lại trên phần cứng.
-Xem [kiểm chứng bản kế thừa](firmware/esp32/BL4012E_REUSE_VALIDATION.md).
+Xem [kiểm chứng bản kế thừa](firmware/esp32/MISS_RECOVERY_VALIDATION.md).
 
 ## Build
 

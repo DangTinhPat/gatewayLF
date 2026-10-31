@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "driver/gpio.h"
@@ -37,14 +38,26 @@
 // Wheel reply: FF FF ID LEN STATUS PRE_LEN PRE_INST PRE_P1 [data] CS
 typedef enum { JB_FMT_JOINT, JB_FMT_WHEEL } jb_format_t;
 
-// Diagnostics only: the transport still follows the upstream request/response sequence.
+#define JB_CAPTURE_LEN 24
+
+// The last exchange that went wrong, kept byte for byte for diagnosis.
+typedef struct {
+  char kind;  // 'E' echo differs from what we sent, 'P' reply cut short, 'F' bad reply frame
+  uint8_t tx_len, rx_len;
+  uint8_t tx[JB_CAPTURE_LEN], rx[JB_CAPTURE_LEN];
+  int64_t at_us;
+} jb_capture_t;
+
+// HCR additions: per-request deadline/authorization and raw transaction trace.
 typedef enum {
   JB_ERROR_NONE, JB_ERROR_PACKET, JB_ERROR_TX, JB_ERROR_ECHO_TIMEOUT,
-  JB_ERROR_ECHO_MISMATCH, JB_ERROR_REPLY_TIMEOUT, JB_ERROR_REPLY_INVALID
+  JB_ERROR_ECHO_MISMATCH, JB_ERROR_REPLY_TIMEOUT, JB_ERROR_REPLY_INVALID,
+  JB_ERROR_DEADLINE, JB_ERROR_CANCELLED, JB_ERROR_QUIET
 } jb_error_t;
 typedef struct {
   uint32_t tx_us, echo_us, total_us;
   uint8_t tx_count, echo_count, rx_count, expected;
+  bool sync_restored;
   uint8_t tx[48], echo[48], rx[48];
 } jb_trace_t;
 
@@ -55,8 +68,19 @@ typedef struct {
   uint32_t err_timeout;
   uint32_t err_echo;
   uint32_t err_frame;
+  uint32_t err_partial;  // subset of err_timeout: some reply bytes arrived
+  uint32_t err_late;     // a reply arrived only after its window had closed
+  uint32_t sync_recovered;  // replies accepted after restoring a lost first 0xFF
+  bool drain;  // the last exchange failed: a late reply may still be on the wire
+  int64_t idle_since_us;  // end of the last exchange (start of the turnaround gap)
+  jb_capture_t last_bad;
+  // Zero deadline / NULL permit preserves unguarded bench API semantics.
+  int64_t deadline_us;
+  bool (*permit)(void *);
+  void *permit_context;
   jb_error_t last_error;
   jb_trace_t trace;
+  uint32_t err_quiet, aborted;
 } joint_bus_t;
 
 typedef struct {

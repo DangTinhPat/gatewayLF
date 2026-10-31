@@ -262,6 +262,16 @@ void BlMotorWorker::fail(MotorError e) noexcept {
   if (state_.error==MotorError::None) state_.error=e;
   state_.prepared=false; ++state_.errors; owner_.trip(e);
 }
+void BlMotorWorker::feedbackFailure(FeedbackError reason, unsigned j, int previous,
+                                    int received, std::uint64_t now) noexcept {
+  if (state_.feedback_error==FeedbackError::None) {
+    state_.feedback_error=reason; state_.feedback_id=owner_.config().id[j];
+    state_.feedback_previous=previous; state_.feedback_received=received;
+    state_.feedback_gap_us=now>=state_.stamp[j]?now-state_.stamp[j]:0;
+    state_.feedback_active=guard_active_;
+  }
+  fail(MotorError::Feedback);
+}
 void BlMotorWorker::recordFailure(unsigned j, std::uint8_t inst, std::uint8_t addr, BusError error) noexcept {
   // Preserve the first failed transaction; OFF retries must not obscure it.
   if (state_.failed_id) return;
@@ -275,21 +285,70 @@ void BlMotorWorker::jointSample(unsigned j, const BusReply& r) noexcept {
     // Joint encoder is signed multi-turn, not a modulo single-turn wheel.
     // Crossing the int16 boundary is not silently unwrapped into a legal target.
     const int delta=int(r.position)-int(previous_joint_[j]);
-    if (std::abs(delta)>16384) { fail(MotorError::Feedback); return; }
+    if (std::abs(delta)>16384) {
+      feedbackFailure(FeedbackError::JointJump,j,previous_joint_[j],r.position,now); return;
+    }
     state_.raw_qd[j]=delta*count_rad/((now-state_.stamp[j])*1e-6F);
   }
   previous_joint_[j]=r.position; state_.raw_q[j]=r.position*count_rad;
   state_.stamp[j]=now;
 }
+bool BlMotorWorker::busPermitValid(void* context) noexcept {
+  auto& self=*static_cast<BlMotorWorker*>(context);
+  const auto latest=self.owner_.request(self.side_);
+  return latest.active && latest.generation==self.guard_request_.generation;
+}
+bool BlMotorWorker::requestBus(BusFormat fmt, std::uint8_t id, std::uint8_t inst,
+                               const std::uint8_t* p, std::size_t n,
+                               std::size_t read, BusReply& reply) noexcept {
+  request_error_=BusError::None;
+  BusPermit permit{};
+  if (guard_active_) {
+    permit.deadline_us=guard_request_.lease_us;
+    if (guard_request_.batch.token && state_.completed!=guard_request_.batch.token)
+      permit.deadline_us=std::min(permit.deadline_us,guard_request_.batch.deadline_us);
+    permit.valid=busPermitValid; permit.context=this;
+  }
+  bus_.setPermit(permit);
+  if (!bus_.permitted()) {
+    request_error_=permit.deadline_us && bus_.now()>=permit.deadline_us?BusError::Deadline:BusError::Cancelled;
+    bus_.setPermit({});
+    if (request_error_==BusError::Deadline) fail(MotorError::Expired);
+    return false;
+  }
+  ++state_.transactions;
+  const bool ok=bus_.request(fmt,id,inst,p,n,read,reply);
+  // Mock buses and hardware must both reject a completion after cancellation/expiry.
+  request_error_=bus_.lastError();
+  const bool still_permitted=bus_.permitted();
+  bus_.setPermit({});
+  if (!still_permitted || bus_.lastError()==BusError::Deadline || bus_.lastError()==BusError::Cancelled) {
+    request_error_=(permit.deadline_us && bus_.now()>=permit.deadline_us) || bus_.lastError()==BusError::Deadline ?
+         BusError::Deadline:BusError::Cancelled;
+    if (request_error_==BusError::Deadline) fail(MotorError::Expired);
+    return false;
+  }
+  return ok;
+}
 bool BlMotorWorker::transact(unsigned j, std::uint8_t inst,
                               const std::uint8_t* p, std::size_t n,
                               std::size_t read, BusReply* out) noexcept {
-  BusReply reply{}; ++state_.transactions;
-  if (!bus_.request(j==2?BusFormat::Wheel:BusFormat::Joint,
-                    owner_.config().id[j],inst,p,n,read,reply)) {
-    recordFailure(j,inst,n?p[0]:0,bus_.lastError());
-    fail(MotorError::Bus); return false;
+  BusReply reply{};
+  // Repeat only reads/pings or the identical absolute MIT block. No blind
+  // retry of wheel speed/enable writes; their acknowledgement rules stay intact.
+  const bool retryable=inst==1 || inst==2 || (j<2 && inst==3 && n==11 && p[0]==0x1a);
+  bool ok=false;
+  for (unsigned attempt=0;attempt<(retryable?2U:1U);++attempt) {
+    if (attempt) ++state_.retries;
+    ok=requestBus(j==2?BusFormat::Wheel:BusFormat::Joint,
+                  owner_.config().id[j],inst,p,n,read,reply);
+    if (ok) { if (attempt) ++state_.recovered_transactions; break; }
+    if (request_error_!=BusError::Cancelled) recordFailure(j,inst,n?p[0]:0,request_error_);
+    const auto error=request_error_;
+    if (state_.error!=MotorError::None || error==BusError::Packet || error==BusError::Unavailable ||
+        error==BusError::Deadline || error==BusError::Cancelled || error==BusError::Quiet) break;
   }
+  if (!ok) { if (request_error_!=BusError::Cancelled && state_.error==MotorError::None) fail(MotorError::Bus); return false; }
   state_.status[j]=reply.status;
   if (reply.status) { recordFailure(j,inst,n?p[0]:0,BusError::None); fail(MotorError::Status); return false; }
   if (j<2) jointSample(j,reply);
@@ -301,17 +360,19 @@ bool BlMotorWorker::torque(unsigned j, bool enable) noexcept {
   // OFF works after a latched fault. Verify the actual enable register rather
   // than treating a transmitted packet or a write ACK as physical release.
   if (!enable) {
+    const bool guarded=guard_active_; guard_active_=false; // OFF is always permitted.
     BusReply reply{}; const auto fmt=j==2?BusFormat::Wheel:BusFormat::Joint;
-    const auto id=owner_.config().id[j]; ++state_.transactions;
-    const bool wrote=bus_.request(fmt,id,3,p,2,0,reply);
-    if (!wrote) recordFailure(j,3,0x18,bus_.lastError());
-    const std::uint8_t read[2]={0x18,1}; ++state_.transactions;
-    const bool read_ok=bus_.request(fmt,id,2,read,2,1,reply);
+    const auto id=owner_.config().id[j];
+    const bool wrote=requestBus(fmt,id,3,p,2,0,reply);
+    if (!wrote) recordFailure(j,3,0x18,request_error_);
+    const std::uint8_t read[2]={0x18,1};
+    const bool read_ok=requestBus(fmt,id,2,read,2,1,reply);
+    guard_active_=guarded;
     state_.torque_enable[j]=read_ok?reply.data[0]:255;
     if (read_ok) state_.status[j]=reply.status;
     if (read_ok && !reply.data[0]) { on_[j]=false; return true; }
     on_[j]=true;
-    recordFailure(j,2,0x18,read_ok?BusError::ReadbackMismatch:bus_.lastError());
+    recordFailure(j,2,0x18,read_ok?BusError::ReadbackMismatch:request_error_);
     fail(read_ok?MotorError::Configuration:MotorError::Bus); return false;
   }
   on_[j]=true; // an unacknowledged enable may still have reached the driver
@@ -319,14 +380,23 @@ bool BlMotorWorker::torque(unsigned j, bool enable) noexcept {
   return transact(j,3,p,2);
 }
 bool BlMotorWorker::wheelSpeed(std::int16_t rpm) noexcept {
+  // Reuse only a confirmed goal during the same enabled session. Encoder
+  // reads still run for every batch; a changed RPM is never deferred.
+  if (on_[2] && wheel_goal_valid_ && rpm==wheel_goal_rpm_ && bus_.now()-wheel_goal_at_<100000) {
+    ++state_.skipped_writes; return true;
+  }
+  wheel_goal_valid_=false;
   std::uint8_t p[3]={0x20,0,0}; put(p+1,rpm);
-  BusReply reply{}; ++state_.transactions;
-  if (bus_.request(BusFormat::Wheel,owner_.config().id[2],3,p,3,0,reply)) {
+  BusReply reply{};
+  if (requestBus(BusFormat::Wheel,owner_.config().id[2],3,p,3,0,reply)) {
     state_.status[2]=reply.status;
     if (reply.status) { recordFailure(2,3,0x20,BusError::None); fail(MotorError::Status); return false; }
+    wheel_goal_valid_=true; wheel_goal_rpm_=rpm; wheel_goal_at_=bus_.now();
     return true;
   }
-  const auto error=bus_.lastError();
+  if (state_.error!=MotorError::None) return false;
+  const auto error=request_error_;
+  if (error==BusError::Cancelled) return false;
   // BL4012e does not require a speed-write ACK. HCR additionally requires
   // evidence of the latched target: only a missing reply may use readback.
   if (error!=BusError::ReplyTimeout) {
@@ -337,27 +407,34 @@ bool BlMotorWorker::wheelSpeed(std::int16_t rpm) noexcept {
   if (static_cast<std::int16_t>(u16(reply.data.data()))!=rpm) {
     recordFailure(2,2,0x20,BusError::ReadbackMismatch); fail(MotorError::Configuration); return false;
   }
+  wheel_goal_valid_=true; wheel_goal_rpm_=rpm; wheel_goal_at_=bus_.now();
   ++state_.recovered_writes; return true;
 }
 bool BlMotorWorker::verifyWheelZero() noexcept {
   const std::uint8_t p[2]={0x20,2}; BusReply r{};
   if (!transact(2,2,p,2,2,&r)) return false;
   if (u16(r.data.data())!=0) { recordFailure(2,2,0x20,BusError::ReadbackMismatch); fail(MotorError::Configuration); return false; }
+  wheel_goal_valid_=true; wheel_goal_rpm_=0; wheel_goal_at_=bus_.now();
   wheel_zero_verified_=true; return true;
 }
 bool BlMotorWorker::wheelRead() noexcept {
   const std::uint8_t p[2]={0x24,6}; BusReply r{};
   if (!transact(2,2,p,2,6,&r)) return false;
   const unsigned pos=u16(r.data.data()); const auto now=bus_.now();
-  if (pos>=1024) { fail(MotorError::Feedback); return false; }
+  if (pos>=1024) {
+    feedbackFailure(FeedbackError::WheelRange,2,previous_wheel_,pos,now); return false;
+  }
   if (wheel_sample_) {
+    if (now>=state_.stamp[2]) state_.wheel_gap_max_us=std::max(state_.wheel_gap_max_us,now-state_.stamp[2]);
     if (!fresh(state_.stamp[2],now,owner_.config().feedback_age_us)) {
-      fail(MotorError::Feedback); return false;
+      feedbackFailure(FeedbackError::WheelGap,2,previous_wheel_,pos,now); return false;
     }
     int delta=int(pos)-int(previous_wheel_);
     if (delta>512) delta-=1024;
     if (delta<-512) delta+=1024;
-    if (std::abs(delta)==512) { fail(MotorError::Feedback); return false; }
+    if (std::abs(delta)==512) {
+      feedbackFailure(FeedbackError::WheelAmbiguous,2,previous_wheel_,pos,now); return false;
+    }
     wheel_counts_+=delta;
   } else { wheel_counts_=pos; wheel_sample_=true; }
   previous_wheel_=pos; state_.stamp[2]=now;
@@ -366,6 +443,7 @@ bool BlMotorWorker::wheelRead() noexcept {
   return true;
 }
 bool BlMotorWorker::off() noexcept {
+  guard_active_=false; bus_.setPermit({}); wheel_goal_valid_=false;
   state_.prepared=false; state_.wheel_ready=false; wheel_enabled_at_=0; wheel_zero_verified_=false;
   bool ok=true;
   // Wheel first; every motor is attempted even when the first one is absent.
@@ -416,10 +494,11 @@ bool BlMotorWorker::allowed(const MotorRequest& r, bool batch) noexcept {
 }
 void BlMotorWorker::step() noexcept {
   const auto started=bus_.now(); auto r=owner_.request(side_);
+  guard_request_=r; guard_active_=r.active;
   if (!validMotorConfig(owner_.config())) { fail(MotorError::Configuration); return; }
   if (r.reset_generation!=state_.reset_generation) {
     state_={}; state_.reset_generation=r.reset_generation;
-    on_={true,true,true}; wheel_sample_=false; wheel_enabled_at_=0; wheel_zero_verified_=false;
+    on_={true,true,true}; wheel_goal_valid_=false; wheel_sample_=false; wheel_enabled_at_=0; wheel_zero_verified_=false;
   }
   if (!r.active && state_.generation!=r.generation) { on_={true,true,true}; state_.off=false; }
   state_.generation=r.generation;
@@ -494,6 +573,7 @@ void BlMotorWorker::step() noexcept {
   }
   const auto duration=bus_.now()-started;
   state_.cycle_max_us=std::max(state_.cycle_max_us,static_cast<std::uint32_t>(duration));
+  state_.bus_stats=bus_.stats();
   owner_.publish(side_,state_);
 }
 } // namespace tap_hw::hybrid

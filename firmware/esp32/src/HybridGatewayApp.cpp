@@ -83,6 +83,7 @@ std::atomic<bool> maintenance_requested{false}, maintenance_ready{false};
 std::atomic<std::uint32_t> maintenance_tick_ms{0};
 bool ota_started = false, ota_uploading = false;
 int ota_error = -1;
+unsigned ota_update_error = 0;
 unsigned ota_percent = 0;
 bool uart_ready = false;
 std::atomic<std::uint32_t> parser_errors{0}, queue_errors{0}, uart_rx_bytes{0}, uart_tx_bytes{0};
@@ -242,7 +243,7 @@ void pumpOta() {
       if (!otaSafe() || ArduinoOTA.getCommand() != U_FLASH) {
         Update.abort(); ota_error = 100; return;
       }
-      ota_uploading = true; ota_error = -1; ota_percent = 0;
+      ota_uploading = true; ota_error = -1; ota_update_error = 0; ota_percent = 0;
       printLine("OTA updating; motor commands locked until reboot\n");
       flushConsoles();
     });
@@ -251,7 +252,11 @@ void pumpOta() {
       ota_percent = total ? static_cast<unsigned>(100ULL*done/total) : 0;
     });
     ArduinoOTA.onError([](ota_error_t error) {
-      Update.abort(); ota_uploading = false;
+      // ArduinoOTA prints Update.errorString() AFTER this callback. Preserve
+      // the original flash/MD5/activation error instead of masking it as Aborted.
+      ota_update_error = Update.getError();
+      if (!Update.hasError()) Update.abort();
+      ota_uploading = false;
       if (ota_error<100) ota_error = static_cast<int>(error);
       printLine("OTA failed; maintenance stays locked, retry or OTA_REBOOT\n");
       flushConsoles();
@@ -270,7 +275,7 @@ void pumpOta() {
 
 void status() {
   char line[512];
-  std::snprintf(line,sizeof line,"BUS_DRIVER source=bl4012e_3in1 idf=%s\n",esp_get_idf_version());
+  std::snprintf(line,sizeof line,"BUS_DRIVER source=bl4012e_3in1_miss_v2 idf=%s\n",esp_get_idf_version());
   printLine(line);
   const auto& s = latest_report.state;
   const auto now = static_cast<std::uint64_t>(esp_timer_get_time());
@@ -298,9 +303,9 @@ void status() {
   for (unsigned i=0;i<32;++i)
     std::snprintf(elf_hash+2*i,3,"%02x",description->app_elf_sha256[i]);
   std::snprintf(line,sizeof line,
-      "OTA supported=%d maintenance=%d off_confirmed=%d ready=%d port=3232 uploading=%d progress=%u error=%d running=%s next=%s elf_sha256=%s build=%s_%s\n",
+      "OTA supported=%d maintenance=%d off_confirmed=%d ready=%d port=3232 uploading=%d progress=%u error=%d update_error=%u running=%s next=%s elf_sha256=%s build=%s_%s\n",
       std::strlen(HCR_OTA_PASSWORD_HASH)==32 && next,maintenance_requested.load(),
-      maintenance_ready.load(),ota_started && otaSafe(),ota_uploading,ota_percent,ota_error,
+      maintenance_ready.load(),ota_started && otaSafe(),ota_uploading,ota_percent,ota_error,ota_update_error,
       running?running->label:"none",next?next->label:"none",elf_hash,__DATE__,__TIME__);
   printLine(line);
   std::snprintf(line,sizeof line,"NET connected=%d ssid=%s ip=%s mac=%s hostname=lf-mcu.local rssi=%d\n",
@@ -344,8 +349,20 @@ void status() {
       side?"R":"L",static_cast<unsigned>(m.error),m.failed_id,m.failed_instruction,m.failed_address,
       static_cast<unsigned>(m.bus_error),m.recovered_writes,m.torque_enable[0],m.torque_enable[1],m.torque_enable[2],m.startup_wheel_goal_rpm);
     printLine(line);
+    std::snprintf(line,sizeof line,
+      "FEEDBACK_DIAG side=%s reason=%u id=%u previous=%ld received=%ld gap_us=%llu wheel_gap_max_us=%llu active=%d\n",
+      side?"R":"L",static_cast<unsigned>(m.feedback_error),m.feedback_id,
+      static_cast<long>(m.feedback_previous),static_cast<long>(m.feedback_received),
+      static_cast<unsigned long long>(m.feedback_gap_us),static_cast<unsigned long long>(m.wheel_gap_max_us),m.feedback_active);
+    printLine(line);
     std::snprintf(line,sizeof line,"BUS_OFF_TEST side=%s done=%u transactions=%u\n",
         side?"R":"L",m.off_test_done,m.transactions); printLine(line);
+    const auto& bs=m.bus_stats;
+    std::snprintf(line,sizeof line,
+      "BUS_RECOVERY side=%s timeout=%u echo=%u frame=%u partial=%u late=%u sync_accepted=%u quiet_fail=%u aborted=%u retries=%u recovered=%u skipped_speed_writes=%u\n",
+      side?"R":"L",bs.timeout,bs.echo,bs.frame,bs.partial,bs.late,bs.sync,bs.quiet,bs.aborted,
+      m.retries,m.recovered_transactions,m.skipped_writes);
+    printLine(line);
     const auto& trace=m.failure_trace;
     char tx_hex[97]{},echo_hex[97]{};
     for (unsigned j=0;j<trace.tx_count;++j) std::snprintf(tx_hex+2*j,3,"%02x",trace.tx[j]);
@@ -356,8 +373,8 @@ void status() {
     for(unsigned i=0;i<trace.rx_count && i<trace.rx.size();++i)
       std::snprintf(rx_hex+2*i,3,"%02x",trace.rx[i]);
     std::snprintf(line,sizeof line,
-      "BUS_TRACE side=%s tx_us=%u echo_us=%u total_us=%u echo_bytes=%u reply_bytes=%u expected=%u rx=%s\n",
-      side?"R":"L",trace.tx_us,trace.echo_us,trace.total_us,trace.echo_count,trace.rx_count,trace.expected,rx_hex);
+      "BUS_TRACE side=%s tx_us=%u echo_us=%u total_us=%u echo_bytes=%u reply_bytes=%u expected=%u sync_restored=%u rx=%s\n",
+      side?"R":"L",trace.tx_us,trace.echo_us,trace.total_us,trace.echo_count,trace.rx_count,trace.expected,trace.sync_restored,rx_hex);
     printLine(line);
   }
 }

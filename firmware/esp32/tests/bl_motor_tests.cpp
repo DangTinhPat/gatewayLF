@@ -23,6 +23,7 @@ struct FakeBus final:MotorBus {
   std::function<void()> hook;
   int fail_id=0, fail_addr=-1, fail_inst=0;
   bool corrupt=false;
+  int fail_remaining=-1;
   bool drop_speed_write=false, ignore_off=false;
   BusError error=BusError::None, injected_error=BusError::ReplyTimeout;
   std::uint8_t status=0;
@@ -34,6 +35,7 @@ struct FakeBus final:MotorBus {
   bool request(BusFormat fmt,std::uint8_t id,std::uint8_t inst,const std::uint8_t* p,
                std::size_t n,std::size_t read,BusReply& out) noexcept override {
     error=BusError::None;
+    if (!permitted()) {error=permit_.deadline_us && clock>=permit_.deadline_us?BusError::Deadline:BusError::Cancelled;return false;}
     std::array<std::uint8_t,48> tx{};
     const auto size=motorPacket(id,inst,p,n,tx); assert(size);
     frames.emplace_back(tx.begin(),tx.begin()+size); clock+=latency;
@@ -45,7 +47,8 @@ struct FakeBus final:MotorBus {
       position[j]=static_cast<std::int16_t>(p[5]|(std::uint16_t(p[6])<<8)); enabled[j]=true;
     }
     if (inst==3 && n==3 && p[0]==0x20 && !drop_speed_write) wheel_rpm=static_cast<std::int16_t>(p[1]|(std::uint16_t(p[2])<<8));
-    if (fail_id==id && (fail_addr<0 || (n && p[0]==fail_addr)) && (!fail_inst || fail_inst==inst)) {
+    if (fail_remaining!=0 && fail_id==id && (fail_addr<0 || (n && p[0]==fail_addr)) && (!fail_inst || fail_inst==inst)) {
+      if (fail_remaining>0) --fail_remaining;
       error=injected_error; return false;
     }
     const unsigned echo=fmt==BusFormat::Wheel?5:7, count=echo+4+read;
@@ -230,6 +233,17 @@ int main(int argc,char** argv) {
     r.now+=21000;assert(!r.motor.feedback(r.now).encoders_valid);
     assert(!r.motor.captureHome({0,0,0,0},r.now));
   }
+  { // An idle scheduling gap is distinguished from a failed bus transaction.
+    Rig r; r.now+=21000; r.workers();
+    const auto d=r.motor.diagnostics();
+    assert(d.error==MotorError::Feedback);
+    assert(d.leg[0].feedback_error==FeedbackError::WheelGap);
+    assert(d.leg[0].feedback_id==1 && d.leg[0].feedback_gap_us>20000);
+    assert(!d.leg[0].feedback_active && d.leg[0].bus_error==BusError::None);
+    assert(d.leg[0].feedback_previous==d.leg[0].feedback_received);
+    assert(r.motor.resetFault()); r.idle();
+    assert(r.motor.diagnostics().leg[0].feedback_error==FeedbackError::None);
+  }
   { // A pending right bus cannot be acknowledged as an applied six-channel batch.
     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);
@@ -326,6 +340,7 @@ int main(int argc,char** argv) {
   for (auto error:{BusError::EchoTimeout,BusError::EchoMismatch,BusError::ReplyInvalid,BusError::Tx}) {
     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
     r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.injected_error=error;
+    t.target[4]=3;
     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
     assert(r.motor.diagnostics().error==MotorError::Bus && r.motor.disabled());
     assert(r.motor.diagnostics().leg[0].bus_error==error);
@@ -333,6 +348,7 @@ int main(int argc,char** argv) {
   { // Missing speed ACK AND missing readback are a bus fault, never an ACK.
     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
     r.left.fail_id=1;r.left.fail_addr=0x20; // both instructions fail
+    t.target[4]=3;
     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
     assert(r.motor.diagnostics().error==MotorError::Bus && r.motor.disabled());
     assert(r.motor.diagnostics().leg[0].failed_instruction==2);
@@ -340,6 +356,7 @@ int main(int argc,char** argv) {
   { // Readback recovery cannot extend the original 20 ms batch deadline.
     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
     r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.latency=6000;
+    t.target[4]=3;
     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
     assert(r.motor.diagnostics().error==MotorError::Expired && r.motor.disabled());
   }
@@ -431,6 +448,61 @@ int main(int argc,char** argv) {
     assert(r.motor.disabled()&&!r.motor.ready());
     r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);assert(!r.motor.startOffTest(20));
   }
+  { // A single lost MIT reply is recovered without changing the absolute target.
+    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+    r.left.fail_id=2;r.left.fail_addr=0x1a;r.left.fail_inst=3;
+    r.left.fail_remaining=1;r.left.injected_error=BusError::EchoMismatch;
+    r.left.frames.clear();++seq;r.run(t,seq);
+    const auto d=r.motor.diagnostics();
+    assert(d.error==MotorError::None && d.leg[0].retries==1 && d.leg[0].recovered_transactions==1);
+    assert(d.leg[0].failed_id==2 && d.leg[0].bus_error==BusError::EchoMismatch);
+    assert(r.left.frames.size()>1 && r.left.frames[0]==r.left.frames[1]);
+  }
+  { // A transient wheel feedback miss is retried, with fresh feedback on success.
+    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+    r.left.fail_id=1;r.left.fail_addr=0x24;r.left.fail_inst=2;r.left.fail_remaining=1;
+    ++seq;r.run(t,seq);
+    assert(r.motor.diagnostics().leg[0].recovered_transactions==1);
+    assert(r.motor.feedback(r.now).encoders_valid);
+  }
+  { // Cancellation during the failed exchange must suppress the retry, but is
+    // a normal DISARM, not a latched driver fault requiring re-homing.
+    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+    r.left.fail_id=2;r.left.fail_addr=0x1a;r.left.fail_inst=3;r.left.fail_remaining=1;
+    r.left.hook=[&](){r.motor.disable();};r.left.frames.clear();
+    MotorApplied a{};r.motor.apply(t,++seq,r.now+20000,r.now,a);r.workers();
+    unsigned mit=0;for(const auto& f:r.left.frames)if(f[4]==3 && f[5]==0x1a)++mit;
+    assert(mit==1 && r.motor.disabled() && r.motor.diagnostics().error==MotorError::None);
+  }
+  { // No retry or next joint TX after the first transaction used the lease.
+    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+    r.left.fail_id=2;r.left.fail_addr=0x1a;r.left.fail_inst=3;r.left.fail_remaining=1;
+    r.left.latency=21000;r.left.frames.clear();MotorApplied a{};
+    r.motor.apply(t,++seq,r.now+20000,r.now,a);r.workers();
+    unsigned mit=0;for(const auto& f:r.left.frames)if(f[4]==3 && f[5]==0x1a)++mit;
+    assert(mit==1 && r.motor.disabled() && r.motor.diagnostics().error==MotorError::Expired);
+  }
+  { // Stable RPM avoids repeated writes but never decimates encoder reads.
+    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+    r.left.frames.clear();r.run(t,seq,400);
+    unsigned writes=0,reads=0;
+    for(const auto& f:r.left.frames){
+      if(f[2]==1 && f[4]==3 && f[5]==0x20)++writes;
+      if(f[2]==1 && f[4]==2 && f[5]==0x24)++reads;
+    }
+    assert(writes>0 && reads>10*writes && r.motor.diagnostics().leg[0].skipped_writes>10);
+    assert(r.motor.feedback(r.now).encoders_valid);
+    // A changed RPM bypasses the keepalive interval and is actually sent/ACKed.
+    t.target[4]=3;++seq;auto a=r.run(t,seq);close(a.target[4],3.036873F);
+    assert(signed16(r.left.last(1,0x20),6)==29);
+    t.target[4]=4;++seq;a=r.run(t,seq);assert(signed16(r.left.last(1,0x20),6)==38);
+    // A new enabled session must preload/verify zero again.
+    r.motor.disable();r.workers();r.left.frames.clear();t.target[4]=0;++seq;r.run(t,seq);
+    bool zero=false;for(const auto& f:r.left.frames)
+      if(f[2]==1 && f[4]==3 && f[5]==0x20 && signed16(f,6)==0)zero=true;
+    assert(zero);
+  }
+  std::puts("PASS: bounded retry, first failure retained, cancellation/expiry and wheel dedup/keepalive/freshness");
   gatewayIntegration();
   std::puts("PASS: golden codec, calibrated side/sign/units, crank FF, quantized applied targets, startup, both-bus ACK, unwrap/freshness, range, expiry, cancellation, write/enable loss, reset, gain/status/CRC faults");
 }

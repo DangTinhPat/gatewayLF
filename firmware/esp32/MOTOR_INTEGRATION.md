@@ -2,8 +2,9 @@
 
 Backend motor dùng `BlMotorBackend`/`EspBlMotor`. Bản ứng viên hiện tại **biên dịch
 trực tiếp module `joint_bus.c` kế thừa từ BL4012e/3in1**, qua adapter C++ mỏng;
-đã bỏ đường FIFO/OEN/RMT tự viết. Build dùng Arduino 3.3.0 / ESP-IDF 5.5.0.
-Xem [bản sửa và mức kiểm chứng](BL4012E_REUSE_VALIDATION.md),
+bản upstream mới dùng FIFO TX + nhả pad khi TX idle, gap100us và drain late reply.
+Adapter không tự thêm OEN/RMT; deadline HCR được đưa xuống module. Build dùng Arduino 3.3.0 / ESP-IDF 5.5.0.
+Xem [bản sửa và mức kiểm chứng](MISS_RECOVERY_VALIDATION.md),
 [nguồn module và delta](vendor/bl4012e/PROVENANCE.md).
 
 Các kết quả nạp/đo trong lịch sử thuộc firmware trước. Bản kế thừa này chưa được
@@ -95,7 +96,8 @@ nguyên; nhánh readback thêm độ trễ cần đo thực tế.
 `MOTOR_DIAG` tách lỗi từng bus khỏi lỗi chung. `first_fail_id/inst/addr/bus_stage`
 giữ giao dịch lỗi đầu tiên tới khi reset backend; OFF retries không ghi đè.
 Stages: 0=none/status, 1=unavailable, 2=packet, 3=TX, 4=echo timeout,
-5=echo mismatch, 6=reply timeout, 7=reply invalid, 8=readback mismatch.
+5=echo mismatch, 6=reply timeout, 7=reply invalid, 8=readback mismatch,
+9=deadline, 10=cancelled, 11=bus chưa yên sau drain.
 `recovered_writes` đếm mất ACK nhưng readback đúng. `enable_readback` theo
 hip/crank/wheel; 255=unknown. OFF mất ACK nhưng readback đúng có thể xuất hiện
 trong first_fail mà không latch lỗi; đối chiếu cả local_fault và off.
@@ -118,13 +120,12 @@ trên core1; service priority20. Worker kiểm deadline độc lập giữa các
 kể cả khi service/UART/console bị treo. Lệnh trùng không gia hạn lease; batch cũ
 quá deadline bị hủy dù vẫn có lệnh mới tới. Lỗi một bus hủy cả hai bus.
 
-Module kế thừa dùng các lượt chờ như 3in1: TX-done 5 ms, echo 2 ms,
-reply joint 2 ms hoặc wheel 6 ms. Đây là timeout từng lượt, **không còn là tổng
-budget 4/8 ms** của adapter cũ. `uart_write_bytes` không có tham số timeout;
-không suy ra một hard deadline vật lý từ tổng các giá trị này. Module kiểm
-checksum, ID, length và opcode/address echo; backend kiểm status. OFF có thể phải đợi giao dịch đang chạy; khi
-bus đứt, không thể bảo đảm driver đã tắt chỉ nhờ gửi OFF. Chưa có bằng chứng về
-watchdog nội tại driver hoặc ngắt lực độc lập khi ESP mất nguồn/reset.
+Module mới dùng TX spin có trần1ms, echo/joint reply3ticks, wheel reply9ticks
+và tối đa3ticks cho byte cuối khi cần. HCR cap thời gian chờ theo deadline
+batch/lease, kiểm lại sau drain/gap và trước TX/ACK; không gia hạn khi retry.
+OFF/configuration cũng có budget20ms mỗi lần gọi module. Đây là điều kiện phần
+mềm, không phải hard deadline cắt lực; OFF có thể phải đợi read/TX đang chạy.
+Xem báo cáo mới cho khác biệt giữa source/build/mock và timing vật lý chưa đo.
 
 Timestamp encoder bánh chỉ cập nhật sau READ 0x24; ACK ghi tốc độ không làm
 mới nó. Sáu encoder phải mới <=20 ms. Bánh unwrap modulo1024; khoảng cách mẫu
@@ -161,6 +162,12 @@ phần truyền tối thiểu là 970/1.000.000 = 0,97 ms mỗi batch, chưa k�
 phản hồi và lịch task. Có thể phục vụ đầu vào 200 Hz về mặt thời gian truyền thô,
 nhưng tần số áp dụng thực phải đọc `cycle_max_us`, tuổi encoder và ACK khi thử
 thật; build/mock không chứng minh 200 Hz.
+
+Khi RPM không đổi và đã được xác nhận trong cùng phiên enable, gateway bỏ qua
+WRITE lặp cho tới keepalive100ms; encoder vẫn được đọc mỗi batch/poll. Batch
+bỏ WRITE còn79byte/bus. RPM thay đổi được gửi ngay; không nhập slot10ms của bench.
+`BUS_RECOVERY` thống kê raw errors, late/sync, retries/recovered và skipped writes;
+first-failure vẫn giữ khi retry thành công, không tự mang nghĩa local_fault.
 
 Cấu hình nằm trong `include/tap_hw/BlMotor.hpp` (`BlMotorConfig`). Sign và
 limit/gain không nhận thay đổi trong lúc ARM; chỉnh cấu hình cần build lại.

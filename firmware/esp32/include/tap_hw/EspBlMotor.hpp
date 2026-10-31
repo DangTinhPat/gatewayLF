@@ -20,6 +20,7 @@ class EspMotorBus final : public MotorBus {
   std::uint64_t now() const noexcept override;
   BusError lastError() const noexcept override { return error_; }
   BusTrace trace() const noexcept override { return trace_; }
+  BusStats stats() const noexcept override;
   bool request(BusFormat, std::uint8_t, std::uint8_t, const std::uint8_t*,
                std::size_t, std::size_t, BusReply&) noexcept override;
  private:

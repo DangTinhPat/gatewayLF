@@ -24,6 +24,7 @@ typedef struct {int baud_rate,data_bits,parity,stop_bits,flow_ctrl,source_clk;} 
 #define SOC_UART_TX_PIN_IDX 0
 #define UART_PERIPH_SIGNAL(u,s) ((unsigned)(u)+(unsigned)(s))
 #define pdMS_TO_TICKS(x) (x)
+#define portTICK_PERIOD_MS 1
 #define ESP_RETURN_ON_ERROR(expr,tag,...) do {(void)(tag);int e=(expr);if(e)return e;}while(0)
 #ifdef __cplusplus
 extern "C" {
@@ -47,6 +48,16 @@ int64_t esp_timer_get_time(void);
 #define portEXIT_CRITICAL(p) ((void)(p))
 #define pdPASS 1
 typedef int portMUX_TYPE;
+#define taskENTER_CRITICAL(p) portENTER_CRITICAL(p)
+#define taskEXIT_CRITICAL(p) portEXIT_CRITICAL(p)
+typedef struct {int unused;} uart_dev_t;
+extern uart_dev_t UART_HW;
+#define UART_LL_GET_HW(num) ((void)(num), &UART_HW)
+bool uart_ll_is_tx_idle(uart_dev_t*);
+uint32_t uart_ll_get_txfifo_len(uart_dev_t*);
+void uart_ll_write_txfifo(uart_dev_t*,const uint8_t*,uint32_t);
+void uart_ll_txfifo_rst(uart_dev_t*);
+void esp_rom_delay_us(uint32_t);
 typedef void* TaskHandle_t;
 static inline int xTaskCreatePinnedToCore(void (*f)(void*),const char*n,int s,void*a,int p,TaskHandle_t*t,int c){(void)f;(void)n;(void)s;(void)a;(void)p;(void)t;(void)c;return pdPASS;}
 static inline void vTaskDelay(int t){(void)t;}

@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "driver/gpio.h"
@@ -37,6 +38,16 @@
 // Wheel reply: FF FF ID LEN STATUS PRE_LEN PRE_INST PRE_P1 [data] CS
 typedef enum { JB_FMT_JOINT, JB_FMT_WHEEL } jb_format_t;
 
+#define JB_CAPTURE_LEN 24
+
+// The last exchange that went wrong, kept byte for byte for diagnosis.
+typedef struct {
+  char kind;  // 'E' echo differs from what we sent, 'P' reply cut short, 'F' bad reply frame
+  uint8_t tx_len, rx_len;
+  uint8_t tx[JB_CAPTURE_LEN], rx[JB_CAPTURE_LEN];
+  int64_t at_us;
+} jb_capture_t;
+
 typedef struct {
   uart_port_t uart;
   gpio_num_t pin;
@@ -44,6 +55,12 @@ typedef struct {
   uint32_t err_timeout;
   uint32_t err_echo;
   uint32_t err_frame;
+  uint32_t err_partial;  // subset of err_timeout: some reply bytes arrived
+  uint32_t err_late;     // a reply arrived only after its window had closed
+  uint32_t sync_recovered;  // replies accepted after restoring a lost first 0xFF
+  bool drain;  // the last exchange failed: a late reply may still be on the wire
+  int64_t idle_since_us;  // end of the last exchange (start of the turnaround gap)
+  jb_capture_t last_bad;
 } joint_bus_t;
 
 typedef struct {
